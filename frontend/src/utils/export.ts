@@ -73,7 +73,9 @@ export function buildCatalogCard(
       if (rubbingLosses.length === 0) lines.push('　　无');
       rubbingLosses.forEach((loss) => {
         lines.push(
-          `　　${encodeCoord(loss.lineNo, loss.charNo)}　${LOSS_TYPE_LABEL[loss.type]}·${LOSS_SEVERITY_LABEL[loss.severity]}　${loss.note || ''}`,
+          `　　${encodeCoord(loss.lineNo, loss.charNo)}　${LOSS_TYPE_LABEL[loss.type]}·${LOSS_SEVERITY_LABEL[loss.severity]}　备注：${
+            loss.note || '—'
+          }${loss.transcription ? `　释文（合作馆并入）：${loss.transcription}` : ''}`,
         );
       });
       lines.push(`　钤印（${rubbingSeals.length} 方）：`);
@@ -136,9 +138,9 @@ export function buildAllCatalogCards(context: ExportContext): string {
     .join('\n\n————————————————\n\n');
 }
 
-/** 损泐台账 CSV（碑刻 / 拓本 / 字位 / 类型 / 程度） */
+/** 损泐台账 CSV（碑刻 / 拓本 / 字位 / 类型 / 程度 / 本馆备注 / 合作馆释文） */
 export function exportLossLedgerCsv(context: ExportContext): string {
-  const header = ['碑名', '拓本版本', '拓法', '行号', '字位', '坐标', '损泐类型', '严重程度', '释文备注'];
+  const header = ['碑名', '拓本版本', '拓法', '行号', '字位', '坐标', '损泐类型', '严重程度', '本馆备注', '释文（合作馆并入）'];
   const lines: string[] = [header.map(csvCell).join(',')];
   context.steles.forEach((stele) => {
     const rubbings = context.rubbings
@@ -157,6 +159,7 @@ export function exportLossLedgerCsv(context: ExportContext): string {
             LOSS_TYPE_LABEL[loss.type],
             LOSS_SEVERITY_LABEL[loss.severity],
             loss.note,
+            loss.transcription ?? '',
           ]
             .map(csvCell)
             .join(','),

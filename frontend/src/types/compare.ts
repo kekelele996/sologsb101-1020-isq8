@@ -22,11 +22,45 @@ export interface Compare {
   operator: string;
   /** 比对日期 yyyy-MM-dd */
   date: string;
+  /** 本馆损泐改动后旧结论待重新确认（旧结论仍写入 CompareHistory 可查） */
+  needsReconfirm?: boolean;
   createdAt: number;
   updatedAt: number;
 }
 
 export type CompareDraft = Omit<Compare, 'id' | 'createdAt' | 'updatedAt'>;
+
+/** 比对结论变更历史：本馆损泐一改动，旧结论即入此表留痕，仍可查询 */
+export type CompareHistoryReason = 'created' | 'reconfirmed' | 'lossChanged';
+
+export interface CompareHistory {
+  id: string;
+  /** 所属比对记录 id */
+  compareId: string;
+  /** 所属碑刻 id */
+  steleId: string;
+  rubbingIdA: string;
+  rubbingIdB: string;
+  /** 当时差异字数 */
+  diffCount: number;
+  /** 当时断代结论 */
+  conclusion: CompareConclusion;
+  operator: string;
+  /** 比对日期 yyyy-MM-dd */
+  compareDate: string;
+  /** 本条历史写入时间（毫秒） */
+  recordedAt: number;
+  /** 变更原因：新建 / 重新确认 / 损泐改动 */
+  reason: CompareHistoryReason;
+  /** 变更说明，如「本馆损泐变动：L03C07」 */
+  detail: string;
+}
+
+export const COMPARE_HISTORY_REASON_LABEL: Record<CompareHistoryReason, string> = {
+  created: '新建比对',
+  reconfirmed: '重新确认',
+  lossChanged: '损泐改动',
+};
 
 export const COMPARE_CONCLUSION_LABEL: Record<CompareConclusion, string> = {
   early: '早本',

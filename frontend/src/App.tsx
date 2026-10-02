@@ -12,6 +12,7 @@ import {
   ExportOutlined,
   FileSearchOutlined,
   PrinterOutlined,
+  TeamOutlined,
 } from '@ant-design/icons';
 import { ROUTES } from './router';
 import { loadAll, useAppDispatch, useAppSelector } from './stores/store';
@@ -58,9 +59,11 @@ export default function App() {
       ? ROUTES.losses
       : location.pathname.startsWith('/compare')
         ? ROUTES.compare
-        : location.pathname.startsWith('/export')
-          ? ROUTES.export
-          : ROUTES.steles;
+        : location.pathname.startsWith('/collab')
+          ? ROUTES.collab
+          : location.pathname.startsWith('/export')
+            ? ROUTES.export
+            : ROUTES.steles;
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -84,6 +87,7 @@ export default function App() {
             { key: ROUTES.rubbings, icon: <PrinterOutlined />, label: '拓本登记' },
             { key: ROUTES.losses, icon: <BookOutlined />, label: '损泐字位' },
             { key: ROUTES.compare, icon: <DiffOutlined />, label: '版本比对' },
+            { key: ROUTES.collab, icon: <TeamOutlined />, label: '联编对账' },
             { key: ROUTES.export, icon: <ExportOutlined />, label: '编目卡导出' },
           ]}
         />

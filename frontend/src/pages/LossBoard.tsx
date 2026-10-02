@@ -207,7 +207,16 @@ export default function LossBoard() {
     {
       title: '释文备注',
       dataIndex: 'note',
-      render: (value: string) => <Typography.Text type="secondary">{value || '未填写'}</Typography.Text>,
+      render: (value: string, record) => (
+        <Space direction="vertical" size={0}>
+          <Typography.Text type="secondary">{value || '备注未填写'}</Typography.Text>
+          {record.transcription ? (
+            <Typography.Text type="secondary" style={{ fontSize: 12, color: '#3a6ea5' }}>
+              释文（合作馆并入）：{record.transcription}
+            </Typography.Text>
+          ) : null}
+        </Space>
+      ),
     },
     {
       title: '差异',
@@ -454,9 +463,18 @@ export default function LossBoard() {
               <Select options={[...LOSS_SEVERITY_OPTIONS]} />
             </Form.Item>
           </Space>
-          <Form.Item name="note" label="释文备注">
+          <Form.Item name="note" label="本馆备注">
             <Input placeholder="如：「壽」字右下漫漶" />
           </Form.Item>
+          {editing?.transcription ? (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`释文（合作馆并入，只读）：${editing.transcription}`}
+              description="该释文由合作馆送件并入，不在本馆字位台修改；本馆备注可继续编辑。"
+            />
+          ) : null}
         </Form>
       </Modal>
     </div>

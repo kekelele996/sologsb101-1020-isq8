@@ -36,6 +36,7 @@ import {
   removeCompare,
   saveCompare,
   selectCompares,
+  selectCompareHistory,
   selectLosses,
   setCompareA,
   setCompareB,
@@ -46,10 +47,12 @@ import {
   COMPARE_CONCLUSION_COLOR,
   COMPARE_CONCLUSION_LABEL,
   COMPARE_CONCLUSION_OPTIONS,
+  COMPARE_HISTORY_REASON_LABEL,
   createEmptyCompareDraft,
   type Compare,
   type CompareConclusion,
   type CompareDraft,
+  type CompareHistory,
 } from '@/types/compare';
 import { buildDiffText, copyText } from '@/utils/export';
 import { encodeCoord } from '@/utils/collate';
@@ -64,6 +67,7 @@ export default function CompareView() {
   const steles = useAppSelector(selectSteles);
   const rubbings = useAppSelector(selectRubbings);
   const compares = useAppSelector(selectCompares);
+  const history = useAppSelector(selectCompareHistory);
   const losses = useAppSelector(selectLosses);
   const compareAId = useAppSelector((state) => state.loss.compareAId);
   const compareBId = useAppSelector((state) => state.loss.compareBId);
@@ -103,6 +107,18 @@ export default function CompareView() {
   const rubbingB = steleRubbings.find((item) => item.id === compareBId);
   const diff = useLossDiff(compareAId ?? undefined, compareBId ?? undefined);
   const stele = steles.find((item) => item.id === steleId);
+
+  const steleHistory = useMemo(
+    () =>
+      history
+        .filter((record) => record.steleId === steleId)
+        .sort((a, b) => b.recordedAt - a.recordedAt),
+    [history, steleId],
+  );
+  const staleCount = useMemo(
+    () => compares.filter((compare) => compare.steleId === steleId && compare.needsReconfirm).length,
+    [compares, steleId],
+  );
 
   const selects: FilterSelectConfig[] = [
     {
@@ -206,6 +222,17 @@ export default function CompareView() {
       render: (value: CompareConclusion) => (
         <Tag color={COMPARE_CONCLUSION_COLOR[value]}>{COMPARE_CONCLUSION_LABEL[value]}</Tag>
       ),
+    },
+    {
+      title: '状态',
+      key: 'status',
+      width: 120,
+      render: (_value, record) =>
+        record.needsReconfirm ? (
+          <Tag color="gold">待重新确认</Tag>
+        ) : (
+          <Tag color="green">已确认</Tag>
+        ),
     },
     { title: '操作人', dataIndex: 'operator', width: 110, render: (value: string) => value || '未填' },
     {
@@ -386,8 +413,17 @@ export default function CompareView() {
             message="断代规则"
             description="A 相对 B 多出的损泐说明 A 拓制更晚、石面更损；据此推断早本 / 晚本，差异全为程度不同或方向相反时判为待考。"
           />
+          {staleCount > 0 ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 14 }}
+              message={`有 ${staleCount} 条比对结论待重新确认`}
+              description="本馆损泐字位已有改动，先前结论可能失效。旧结论仍可在下方「结论变更历史」查询；点「编辑」复核保存后即重新确认。"
+            />
+          ) : null}
           <Card className="gb-table-card" title="比对记录" styles={{ body: { padding: 0 } }}>
-            {compares.length === 0 ? (
+            {compares.filter((compare) => compare.steleId === steleId).length === 0 ? (
               <EmptyPanel
                 title="还没有比对记录"
                 description="完成一次差异比对后点击「保存比对记录」即可归档断代结论。"
@@ -400,6 +436,73 @@ export default function CompareView() {
                 pagination={{ pageSize: 6 }}
                 columns={columns}
                 dataSource={compares.filter((compare) => compare.steleId === steleId)}
+              />
+            )}
+          </Card>
+
+          <Card
+            className="gb-table-card"
+            title="结论变更历史"
+            style={{ marginTop: 14 }}
+            styles={{ body: { padding: 0 } }}
+          >
+            {steleHistory.length === 0 ? (
+              <EmptyPanel
+                title="暂无历史结论"
+                description="损泐改动或重新确认后，旧结论会留痕在此，随时可查。"
+                size="small"
+              />
+            ) : (
+              <Table<CompareHistory>
+                rowKey="id"
+                size="small"
+                pagination={{ pageSize: 5 }}
+                dataSource={steleHistory}
+                columns={[
+                  {
+                    title: "时间",
+                    dataIndex: "recordedAt",
+                    width: 150,
+                    render: (value: number) => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }),
+                  },
+                  {
+                    title: "事由",
+                    dataIndex: "reason",
+                    width: 90,
+                    render: (value: CompareHistory["reason"]) => (
+                      <Tag color={value === "lossChanged" ? "gold" : value === "reconfirmed" ? "blue" : "green"}>
+                        {COMPARE_HISTORY_REASON_LABEL[value]}
+                      </Tag>
+                    ),
+                  },
+                  {
+                    title: "旧结论",
+                    key: "old",
+                    width: 120,
+                    render: (_value, record) => (
+                      <Space size={4}>
+                        <Tag color={COMPARE_CONCLUSION_COLOR[record.conclusion]}>
+                          {COMPARE_CONCLUSION_LABEL[record.conclusion]}
+                        </Tag>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          差异 {record.diffCount}
+                        </Typography.Text>
+                      </Space>
+                    ),
+                  },
+                  {
+                    title: "说明",
+                    dataIndex: "detail",
+                    render: (value: string, record) => (
+                      <Space direction="vertical" size={0}>
+                        <Typography.Text style={{ fontSize: 12 }}>{value}</Typography.Text>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          {record.compareDate} · {record.operator || "未填"}
+                        </Typography.Text>
+                      </Space>
+                    ),
+                  },
+                ]}
               />
             )}
           </Card>
