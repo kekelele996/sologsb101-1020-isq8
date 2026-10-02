@@ -5,7 +5,7 @@
 import { useCallback, useMemo } from 'react';
 import { useAppSelector } from '@/stores/store';
 import { selectLosses } from '@/stores/lossSlice';
-import { diffLosses, matchConclusion, type LossDiffResult, type LossDiffRow } from '@/utils/collate';
+import { buildLossFingerprint, diffLosses, matchConclusion, type LossDiffResult, type LossDiffRow } from '@/utils/collate';
 import type { CompareConclusion } from '@/types/compare';
 
 export interface UseLossDiffResult {
@@ -19,6 +19,8 @@ export interface UseLossDiffResult {
   suggestedConclusion: CompareConclusion;
   /** 差异字数 */
   diffCount: number;
+  fingerprintA: string;
+  fingerprintB: string;
   /** 指定两个拓本做比对（供字位页按需调用） */
   diffOf: (rubbingIdA: string, rubbingIdB: string) => LossDiffResult;
   /** 指定拓本的损泐条数 */
@@ -61,12 +63,25 @@ export function useLossDiff(rubbingIdA?: string, rubbingIdB?: string): UseLossDi
     [losses],
   );
 
+  const lossesA = useMemo(
+    () => (rubbingIdA ? losses.filter((loss) => loss.rubbingId === rubbingIdA) : []),
+    [losses, rubbingIdA],
+  );
+  const lossesB = useMemo(
+    () => (rubbingIdB ? losses.filter((loss) => loss.rubbingId === rubbingIdB) : []),
+    [losses, rubbingIdB],
+  );
+  const fingerprintA = useMemo(() => buildLossFingerprint(lossesA), [lossesA]);
+  const fingerprintB = useMemo(() => buildLossFingerprint(lossesB), [lossesB]);
+
   return {
     result,
     diffRows,
     sameRows,
     suggestedConclusion: matchConclusion(result),
     diffCount: result.diffCount,
+    fingerprintA,
+    fingerprintB,
     diffOf,
     lossCountOf,
   };

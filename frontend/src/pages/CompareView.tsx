@@ -22,7 +22,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DeleteOutlined, EditOutlined, SaveOutlined, SwapOutlined } from '@ant-design/icons';
+import { DeleteOutlined, HistoryOutlined, SaveOutlined, SwapOutlined } from '@ant-design/icons';
 import EmptyPanel from '@/components/common/EmptyPanel';
 import FilterBar, { useFilterQuery, type FilterSelectConfig } from '@/components/common/FilterBar';
 import LossTag from '@/components/common/LossTag';
@@ -39,20 +39,21 @@ import {
   selectLosses,
   setCompareA,
   setCompareB,
-  updateCompare,
 } from '@/stores/lossSlice';
 import { LOSS_TYPE_OPTIONS, type LossType } from '@/types/loss';
 import {
   COMPARE_CONCLUSION_COLOR,
   COMPARE_CONCLUSION_LABEL,
   COMPARE_CONCLUSION_OPTIONS,
+  COMPARE_STATUS_COLOR,
+  COMPARE_STATUS_LABEL,
   createEmptyCompareDraft,
   type Compare,
   type CompareConclusion,
   type CompareDraft,
 } from '@/types/compare';
 import { buildDiffText, copyText } from '@/utils/export';
-import { encodeCoord } from '@/utils/collate';
+import { buildLossFingerprint, encodeCoord } from '@/utils/collate';
 
 const FILTER_KEYS = ['type'] as const;
 
@@ -103,6 +104,12 @@ export default function CompareView() {
   const rubbingB = steleRubbings.find((item) => item.id === compareBId);
   const diff = useLossDiff(compareAId ?? undefined, compareBId ?? undefined);
   const stele = steles.find((item) => item.id === steleId);
+  const selectedPairCompare = compares.find(
+    (item) =>
+      item.steleId === steleId &&
+      ((item.rubbingIdA === compareAId && item.rubbingIdB === compareBId) ||
+        (item.rubbingIdA === compareBId && item.rubbingIdB === compareAId)),
+  );
 
   const selects: FilterSelectConfig[] = [
     {
@@ -154,12 +161,16 @@ export default function CompareView() {
       rubbingIdB: compareBId,
       diffCount: diff.diffCount,
       conclusion: diff.suggestedConclusion,
+      fingerprintA: diff.fingerprintA,
+      fingerprintB: diff.fingerprintB,
     });
     setOpen(true);
   };
 
   const openEdit = (compare: Compare): void => {
     setEditing(compare);
+    const lossesA = losses.filter((loss) => loss.rubbingId === compare.rubbingIdA);
+    const lossesB = losses.filter((loss) => loss.rubbingId === compare.rubbingIdB);
     form.setFieldsValue({
       steleId: compare.steleId,
       rubbingIdA: compare.rubbingIdA,
@@ -167,7 +178,9 @@ export default function CompareView() {
       diffCount: compare.diffCount,
       conclusion: compare.conclusion,
       operator: compare.operator,
-      date: compare.date,
+      date: new Date().toISOString().slice(0, 10),
+      fingerprintA: buildLossFingerprint(lossesA),
+      fingerprintB: buildLossFingerprint(lossesB),
     });
     setOpen(true);
   };
@@ -175,8 +188,8 @@ export default function CompareView() {
   const submit = async (): Promise<void> => {
     const values = await form.validateFields();
     if (editing) {
-      await dispatch(updateCompare({ id: editing.id, patch: values })).unwrap();
-      message.success('已更新比对记录');
+      await dispatch(saveCompare(values)).unwrap();
+      message.success(`已形成新的复核版本，旧结论「${COMPARE_CONCLUSION_LABEL[editing.conclusion]}」仍保留可查`);
     } else {
       await dispatch(saveCompare(values)).unwrap();
       message.success(`已保存比对记录：差异 ${values.diffCount} 字，结论「${COMPARE_CONCLUSION_LABEL[values.conclusion]}」`);
@@ -207,15 +220,26 @@ export default function CompareView() {
         <Tag color={COMPARE_CONCLUSION_COLOR[value]}>{COMPARE_CONCLUSION_LABEL[value]}</Tag>
       ),
     },
-    { title: '操作人', dataIndex: 'operator', width: 110, render: (value: string) => value || '未填' },
+    {
+      title: '结论版本',
+      dataIndex: 'status',
+      width: 130,
+      render: (value: Compare['status'], record) => (
+        <Space direction="vertical" size={2}>
+          <Tag color={COMPARE_STATUS_COLOR[value]}>{COMPARE_STATUS_LABEL[value]}</Tag>
+          {record.staleReason ? <Typography.Text type="warning" style={{ fontSize: 12 }}>{record.staleReason}</Typography.Text> : null}
+        </Space>
+      ),
+    },
+    { title: '操作人', dataIndex: 'operator', width: 100, render: (value: string) => value || '未填' },
     {
       title: '操作',
       key: 'action',
-      width: 150,
+      width: 170,
       render: (_value, record) => (
         <Space size={4}>
-          <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
-            编辑
+          <Button size="small" type="link" icon={<HistoryOutlined />} onClick={() => openEdit(record)}>
+            {record.status === 'stale' ? '重新确认' : '新版复核'}
           </Button>
           <Popconfirm
             title="删除该比对记录"
@@ -269,6 +293,16 @@ export default function CompareView() {
         <StatBadge label="一致字位" value={diff.result.sameCount} suffix="字" tone="success" />
         <StatBadge label="推断结论" value={COMPARE_CONCLUSION_LABEL[diff.suggestedConclusion]} tone="success" />
       </div>
+
+      {selectedPairCompare?.status === 'stale' ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message="先前比对结论已因本馆损泐改动而失效"
+          description={`${selectedPairCompare.staleReason}；请重新看物后点击「保存比对记录」或记录中的「重新确认」形成新版，旧结论仍保留。`}
+        />
+      ) : null}
 
       <Card size="small" style={{ marginBottom: 14 }}>
         <Space wrap size={12} align="center">
@@ -408,7 +442,7 @@ export default function CompareView() {
 
       <Modal
         open={open}
-        title={editing ? '编辑比对记录' : '保存比对记录'}
+        title={editing ? `形成复核新版（旧结论：${COMPARE_CONCLUSION_LABEL[editing.conclusion]}）` : '保存比对记录'}
         onCancel={() => setOpen(false)}
         onOk={() => void submit()}
         okText="保存"
@@ -432,6 +466,15 @@ export default function CompareView() {
               <Input type="date" />
             </Form.Item>
           </Space>
+          {editing ? (
+            <Alert
+              type={editing.status === 'stale' ? 'warning' : 'info'}
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`${COMPARE_STATUS_LABEL[editing.status]}：${COMPARE_CONCLUSION_LABEL[editing.conclusion]}（${editing.date}）`}
+              description={editing.staleReason || '保存后会另存为一条新结论，旧记录不会覆盖，仍可在此表查询。'}
+            />
+          ) : null}
           <Alert
             type="success"
             showIcon

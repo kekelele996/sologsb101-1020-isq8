@@ -4,9 +4,11 @@
  */
 import { createAsyncThunk, createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import { createId, db } from '@/utils/db';
+import { saveCompareRevision } from '@/utils/reconciliation';
 import type { Loss, LossDraft, LossSeverity, LossType } from '@/types/loss';
 import type { Compare, CompareDraft } from '@/types/compare';
 import { sortLosses } from '@/utils/collate';
+import { invalidateComparesForRubbingIds, synchronizeReconciliationForRubbing } from '@/utils/reconciliation';
 import type { RootState } from './store';
 
 export interface LossFilters {
@@ -40,7 +42,11 @@ const initialState: LossState = {
 
 export const loadLosses = createAsyncThunk('loss/load', async () => {
   const [losses, compares] = await Promise.all([db.losses.toArray(), db.compares.toArray()]);
-  compares.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  compares.sort((a, b) => {
+    const statusWeight = (status: Compare['status']): number =>
+      status === 'current' ? 0 : status === 'stale' ? 1 : 2;
+    return statusWeight(a.status) - statusWeight(b.status) || b.updatedAt - a.updatedAt || a.date.localeCompare(b.date);
+  });
   return { losses: sortLosses(losses), compares };
 });
 
@@ -48,6 +54,8 @@ export const createLoss = createAsyncThunk('loss/create', async (draft: LossDraf
   const now = Date.now();
   const row: Loss = { ...draft, id: createId('loss'), createdAt: now, updatedAt: now };
   await db.losses.put(row);
+  await synchronizeReconciliationForRubbing(row.rubbingId);
+  await invalidateComparesForRubbingIds([row.rubbingId]);
   await dispatch(loadLosses());
   return row;
 });
@@ -55,13 +63,25 @@ export const createLoss = createAsyncThunk('loss/create', async (draft: LossDraf
 export const updateLoss = createAsyncThunk(
   'loss/update',
   async (payload: { id: string; patch: Partial<Loss> }, { dispatch }) => {
+    const previous = await db.losses.get(payload.id);
     await db.losses.update(payload.id, { ...payload.patch, updatedAt: Date.now() } as never);
+    const next = await db.losses.get(payload.id);
+    const rubbingIds = Array.from(new Set([previous?.rubbingId, next?.rubbingId].filter((id): id is string => Boolean(id))));
+    await Promise.all([
+      synchronizeReconciliationForRubbing(next?.rubbingId ?? previous?.rubbingId ?? ''),
+      invalidateComparesForRubbingIds(rubbingIds),
+    ]);
     await dispatch(loadLosses());
   },
 );
 
 export const removeLoss = createAsyncThunk('loss/remove', async (id: string, { dispatch }) => {
+  const previous = await db.losses.get(id);
   await db.losses.delete(id);
+  if (previous) {
+    await synchronizeReconciliationForRubbing(previous.rubbingId);
+    await invalidateComparesForRubbingIds([previous.rubbingId]);
+  }
   await dispatch(loadLosses());
 });
 
@@ -73,15 +93,20 @@ export const batchUpdateLosses = createAsyncThunk(
     const rows = state.loss.items
       .filter((item) => payload.ids.includes(item.id))
       .map((item) => ({ ...item, ...payload.patch, updatedAt: now }));
-    if (rows.length > 0) await db.losses.bulkPut(rows);
+    if (rows.length > 0) {
+      await db.losses.bulkPut(rows);
+      const rubbingIds = Array.from(new Set(rows.map((row) => row.rubbingId)));
+      await Promise.all([
+        ...rubbingIds.map((rubbingId) => synchronizeReconciliationForRubbing(rubbingId)),
+        invalidateComparesForRubbingIds(rubbingIds),
+      ]);
+    }
     await dispatch(loadLosses());
   },
 );
 
 export const saveCompare = createAsyncThunk('compare/save', async (draft: CompareDraft, { dispatch }) => {
-  const now = Date.now();
-  const row: Compare = { ...draft, id: createId('cmp'), createdAt: now, updatedAt: now };
-  await db.compares.put(row);
+  const row = await saveCompareRevision(draft);
   await dispatch(loadLosses());
   return row;
 });

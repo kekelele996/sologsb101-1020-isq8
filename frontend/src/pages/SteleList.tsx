@@ -101,7 +101,9 @@ export default function SteleList() {
     const steleRubbings = rubbings.filter((rubbing) => rubbing.steleId === steleId);
     const rubbingIds = steleRubbings.map((rubbing) => rubbing.id);
     const steleCompares = compares.filter((compare) => compare.steleId === steleId);
-    const lastCompare = [...steleCompares].sort((a, b) => b.date.localeCompare(a.date))[0];
+    const lastCompare = [...steleCompares]
+      .filter((compare) => compare.status === 'current')
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
     return {
       rubbings: steleRubbings.length,
       diff: steleCompares.reduce((sum, compare) => sum + compare.diffCount, 0),

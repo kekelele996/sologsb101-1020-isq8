@@ -7,11 +7,12 @@ import type { Rubbing } from '@/types/rubbing';
 import type { Loss } from '@/types/loss';
 import type { Seal } from '@/types/seal';
 import type { Compare } from '@/types/compare';
+import type { ReconciliationItem } from '@/types/reconciliation';
 import { STELE_FORM_LABEL } from '@/types/stele';
 import { INK_TONE_LABEL, RUBBING_METHOD_LABEL, RUBBING_STATE_LABEL } from '@/types/rubbing';
 import { LOSS_SEVERITY_LABEL, LOSS_TYPE_LABEL } from '@/types/loss';
 import { SEAL_TYPE_LABEL, sealPositionWeight } from '@/types/seal';
-import { COMPARE_CONCLUSION_LABEL } from '@/types/compare';
+import { COMPARE_CONCLUSION_LABEL, COMPARE_STATUS_LABEL } from '@/types/compare';
 import { diffLosses, encodeCoord, sortLosses } from './collate';
 import type { RubbingSnapshot } from './db';
 
@@ -73,7 +74,9 @@ export function buildCatalogCard(
       if (rubbingLosses.length === 0) lines.push('　　无');
       rubbingLosses.forEach((loss) => {
         lines.push(
-          `　　${encodeCoord(loss.lineNo, loss.charNo)}　${LOSS_TYPE_LABEL[loss.type]}·${LOSS_SEVERITY_LABEL[loss.severity]}　${loss.note || ''}`,
+          `　　${encodeCoord(loss.lineNo, loss.charNo)}　${LOSS_TYPE_LABEL[loss.type]}·${LOSS_SEVERITY_LABEL[loss.severity]}　${loss.note || ''}${
+            loss.partnerTranscription ? `　【合作馆补释】${loss.partnerTranscription}` : ''
+          }`,
         );
       });
       lines.push(`　钤印（${rubbingSeals.length} 方）：`);
@@ -93,7 +96,7 @@ export function buildCatalogCard(
     lines.push(
       `　${compare.date}　A：第 ${a?.versionNo ?? '?'} 版　B：第 ${b?.versionNo ?? '?'} 版　差异 ${compare.diffCount} 字　结论 ${
         COMPARE_CONCLUSION_LABEL[compare.conclusion]
-      }　操作人 ${compare.operator || '未填'}`,
+      }　${COMPARE_STATUS_LABEL[compare.status]}　操作人 ${compare.operator || '未填'}${compare.staleReason ? `　备注：${compare.staleReason}` : ''}`,
     );
   });
   return lines.join('\n');
@@ -118,6 +121,7 @@ export interface ExportContext {
   losses: Loss[];
   seals: Seal[];
   compares: Compare[];
+  reconciliationItems: ReconciliationItem[];
 }
 
 /** 全部碑刻的编目卡合订文本 */
@@ -138,7 +142,7 @@ export function buildAllCatalogCards(context: ExportContext): string {
 
 /** 损泐台账 CSV（碑刻 / 拓本 / 字位 / 类型 / 程度） */
 export function exportLossLedgerCsv(context: ExportContext): string {
-  const header = ['碑名', '拓本版本', '拓法', '行号', '字位', '坐标', '损泐类型', '严重程度', '释文备注'];
+  const header = ['碑名', '拓本版本', '拓法', '行号', '字位', '坐标', '损泐类型', '严重程度', '本馆释文备注', '合作馆补释', '联编状态'];
   const lines: string[] = [header.map(csvCell).join(',')];
   context.steles.forEach((stele) => {
     const rubbings = context.rubbings
@@ -146,6 +150,12 @@ export function exportLossLedgerCsv(context: ExportContext): string {
       .sort((a, b) => a.versionNo - b.versionNo);
     rubbings.forEach((rubbing) => {
       sortLosses(context.losses.filter((loss) => loss.rubbingId === rubbing.id)).forEach((loss) => {
+        const reconciliation = context.reconciliationItems.find(
+          (item) =>
+            item.collectionNo === rubbing.collectionNo &&
+            item.lineNo === loss.lineNo &&
+            item.charNo === loss.charNo,
+        );
         lines.push(
           [
             stele.title,
@@ -157,6 +167,18 @@ export function exportLossLedgerCsv(context: ExportContext): string {
             LOSS_TYPE_LABEL[loss.type],
             LOSS_SEVERITY_LABEL[loss.severity],
             loss.note,
+            loss.partnerTranscription ?? '',
+            reconciliation
+              ? {
+                  matched: '已对上',
+                  partnerOnlyPending: '仅合作馆有·待核',
+                  localOnlyPending: '仅本馆有·待核',
+                  confirmedPartner: '已采合作馆',
+                  confirmedLocal: '已维持本馆',
+                  rejectedPartner: '未采合作馆',
+                  rejectedLocal: '已撤销本馆',
+                }[reconciliation.status]
+              : '',
           ]
             .map(csvCell)
             .join(','),

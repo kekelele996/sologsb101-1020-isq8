@@ -21,8 +21,10 @@ export interface Loss {
   type: LossType;
   /** 严重程度 */
   severity: LossSeverity;
-  /** 释文备注 */
+  /** 释文备注（本馆编目员维护） */
   note: string;
+  /** 合作馆补释；对账时并入，不覆盖本馆 note */
+  partnerTranscription?: string;
   createdAt: number;
   updatedAt: number;
 }

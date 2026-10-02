@@ -205,9 +205,16 @@ export default function LossBoard() {
       render: (value: LossSeverity) => <Tag color={LOSS_SEVERITY_COLOR[value]}>{LOSS_SEVERITY_LABEL[value]}</Tag>,
     },
     {
-      title: '释文备注',
+      title: '本馆备注',
       dataIndex: 'note',
       render: (value: string) => <Typography.Text type="secondary">{value || '未填写'}</Typography.Text>,
+    },
+    {
+      title: '对方补释',
+      dataIndex: 'partnerTranscription',
+      width: 180,
+      render: (value: string | undefined) =>
+        value ? <Typography.Text type="success">{value}</Typography.Text> : <Typography.Text type="secondary">无</Typography.Text>,
     },
     {
       title: '差异',
@@ -454,8 +461,16 @@ export default function LossBoard() {
               <Select options={[...LOSS_SEVERITY_OPTIONS]} />
             </Form.Item>
           </Space>
-          <Form.Item name="note" label="释文备注">
+          <Form.Item name="note" label="释文备注（本馆维护）">
             <Input placeholder="如：「壽」字右下漫漶" />
+          </Form.Item>
+          <Form.Item label="合作馆补释（并入但不改写本馆备注）">
+            <Input.TextArea
+              readOnly
+              rows={2}
+              value={editing?.partnerTranscription ?? ''}
+              placeholder="联编对账后由合作馆释文自动并入"
+            />
           </Form.Item>
         </Form>
       </Modal>

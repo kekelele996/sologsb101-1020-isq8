@@ -50,6 +50,18 @@ export function coordKey(loss: Pick<Loss, 'lineNo' | 'charNo'>): string {
   return `${loss.lineNo}:${loss.charNo}`;
 }
 
+/** 比对结论所依赖的损泐指纹；坐标、类型、程度或本馆释文变动都会使旧结论待重新确认 */
+export function buildLossFingerprint(losses: Loss[]): string {
+  return sortLosses(losses)
+    .map((loss) => `${loss.lineNo}:${loss.charNo}:${loss.type}:${severityWeight(loss.severity)}:${loss.note}`)
+    .join('|');
+}
+
+/** 同一对拓本的稳定键，不区分 A/B 顺序 */
+export function comparePairKey(rubbingIdA: string, rubbingIdB: string): string {
+  return [rubbingIdA, rubbingIdB].sort().join('::');
+}
+
 export interface LossDiffRow {
   key: string;
   lineNo: number;

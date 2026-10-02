@@ -1,7 +1,7 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Loss 增加 charNo 与复合索引，并按行号顺序重建历史字位记录）
- * - 五张业务表的增删改查与整库导入导出
+ * - 数据结构版本号与升级迁移逻辑（v1 → v2：Loss 增加 charNo；v2 → v3：联编对账与比对复核）
+ * - 业务表的增删改查与整库导入导出
  * - 首次打开自动播种三层互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
  */
@@ -11,13 +11,14 @@ import type { Rubbing } from '@/types/rubbing';
 import type { Loss } from '@/types/loss';
 import type { Seal } from '@/types/seal';
 import type { Compare } from '@/types/compare';
+import type { PartnerLoss, ReconciliationBatch, ReconciliationItem } from '@/types/reconciliation';
 import { sortLosses } from './collate';
 
 /** 数据库名（README 与导出文件均使用该名称） */
 export const DB_NAME = 'gbrubbing';
 
 /** 当前数据结构版本号 */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -85,6 +86,9 @@ class RubbingDatabase extends Dexie {
   losses!: Table<Loss, string>;
   seals!: Table<Seal, string>;
   compares!: Table<Compare, string>;
+  partnerLosses!: Table<PartnerLoss, string>;
+  reconciliationBatches!: Table<ReconciliationBatch, string>;
+  reconciliationItems!: Table<ReconciliationItem, string>;
 
   constructor() {
     super(DB_NAME);
@@ -99,19 +103,33 @@ class RubbingDatabase extends Dexie {
     });
 
     // v2：Loss 增加 charNo 与 [rubbingId+lineNo+charNo] 复合索引，并按行号顺序重建历史字位记录
+    this.version(2).stores({
+      steles: 'id, title, era, form, location, updatedAt',
+      rubbings: 'id, steleId, versionNo, method, inkTone, state, updatedAt',
+      losses: 'id, rubbingId, lineNo, charNo, [rubbingId+lineNo+charNo], type, severity, updatedAt',
+      seals: 'id, rubbingId, sealType, position, updatedAt',
+      compares: 'id, steleId, rubbingIdA, rubbingIdB, conclusion, date, updatedAt',
+    });
+
+    // v3：合作馆字位、对账批次/结果独立成表；比对结论增加复核状态与损泐指纹
     this.version(DB_SCHEMA_VERSION)
       .stores({
         steles: 'id, title, era, form, location, updatedAt',
-        rubbings: 'id, steleId, versionNo, method, inkTone, state, updatedAt',
+        rubbings: 'id, steleId, versionNo, collectionNo, method, inkTone, state, updatedAt',
         losses: 'id, rubbingId, lineNo, charNo, [rubbingId+lineNo+charNo], type, severity, updatedAt',
         seals: 'id, rubbingId, sealType, position, updatedAt',
-        compares: 'id, steleId, rubbingIdA, rubbingIdB, conclusion, date, updatedAt',
+        compares:
+          'id, steleId, rubbingIdA, rubbingIdB, conclusion, status, date, [rubbingIdA+rubbingIdB], updatedAt',
+        partnerLosses: 'id, batchId, collectionNo, [collectionNo+lineNo+charNo], receivedAt, updatedAt',
+        reconciliationBatches: 'id, partnerName, status, receivedAt, updatedAt',
+        reconciliationItems:
+          'id, batchId, firstBatchId, collectionNo, rubbingId, status, lineNo, charNo, [collectionNo+lineNo+charNo], updatedAt',
       })
       .upgrade(async (tx) => {
-        const table = tx.table<Loss>('losses');
-        const all = await table.toArray();
+        const lossTable = tx.table<Loss>('losses');
+        const allLosses = await lossTable.toArray();
         const byRubbing = new Map<string, Loss[]>();
-        all.forEach((loss) => {
+        allLosses.forEach((loss) => {
           byRubbing.set(loss.rubbingId, [...(byRubbing.get(loss.rubbingId) ?? []), loss]);
         });
         const rebuilt: Loss[] = [];
@@ -126,7 +144,20 @@ class RubbingDatabase extends Dexie {
             rebuilt.push({ ...loss, charNo, updatedAt: Date.now() });
           });
         });
-        await table.bulkPut(sortLosses(rebuilt));
+        await lossTable.bulkPut(sortLosses(rebuilt));
+
+        const compareTable = tx.table<Compare>('compares');
+        const oldCompares = await compareTable.toArray();
+        await compareTable.bulkPut(
+          oldCompares.map((compare) => ({
+            ...compare,
+            status: 'stale',
+            staleReason: 'v3 升级前旧结论，源损泐指纹缺失，需重新确认',
+            fingerprintA: '',
+            fingerprintB: '',
+            updatedAt: Date.now(),
+          })),
+        );
       });
   }
 }
@@ -149,7 +180,7 @@ export async function initDatabase(): Promise<void> {
 }
 
 /* ------------------------------ 播种数据 ------------------------------ */
-/* 三层互相引用：Stele → Rubbing →（Loss / Seal）＋ Stele → Compare */
+/* 三层互相引用：Stele → Rubbing →（Loss / Seal）＋ Stele → Compare；v3 追加合作馆联编数据 */
 
 export async function seedDatabase(): Promise<void> {
   const now = Date.now();
@@ -200,9 +231,9 @@ export async function seedDatabase(): Promise<void> {
   ];
 
   const losses: Loss[] = [
-    { id: 'loss_010101', rubbingId: 'rub_0101', lineNo: 3, charNo: 7, type: 'blur', severity: 'light', note: '「壽」字右下漫漶', createdAt: now - day * 30, updatedAt: now - day * 30 },
+    { id: 'loss_010101', rubbingId: 'rub_0101', lineNo: 3, charNo: 7, type: 'blur', severity: 'light', note: '「壽」字右下漫漶', partnerTranscription: '合作馆补：右下石花初现', createdAt: now - day * 30, updatedAt: now - day * 2 },
     { id: 'loss_010102', rubbingId: 'rub_0101', lineNo: 5, charNo: 2, type: 'stoneFlower', severity: 'medium', note: '石花漫及「年」字', createdAt: now - day * 30, updatedAt: now - day * 29 },
-    { id: 'loss_010103', rubbingId: 'rub_0101', lineNo: 9, charNo: 11, type: 'missing', severity: 'heavy', note: '「禮」字缺末笔', createdAt: now - day * 28, updatedAt: now - day * 28 },
+    { id: 'loss_010103', rubbingId: 'rub_0101', lineNo: 9, charNo: 11, type: 'missing', severity: 'heavy', note: '「禮」字缺末笔', partnerTranscription: '合作馆释：「禮」字末笔泐去', createdAt: now - day * 28, updatedAt: now - day * 2 },
     { id: 'loss_010201', rubbingId: 'rub_0102', lineNo: 3, charNo: 7, type: 'blur', severity: 'medium', note: '晚拓，「壽」字已损', createdAt: now - day * 24, updatedAt: now - day * 24 },
     { id: 'loss_010202', rubbingId: 'rub_0102', lineNo: 9, charNo: 11, type: 'missing', severity: 'heavy', note: '「禮」字全缺', createdAt: now - day * 24, updatedAt: now - day * 22 },
     { id: 'loss_010203', rubbingId: 'rub_0102', lineNo: 12, charNo: 4, type: 'crack', severity: 'medium', note: '碑面斜裂一道', createdAt: now - day * 22, updatedAt: now - day * 22 },
@@ -210,6 +241,7 @@ export async function seedDatabase(): Promise<void> {
     { id: 'loss_020201', rubbingId: 'rub_0202', lineNo: 2, charNo: 5, type: 'crack', severity: 'light', note: '崖面细裂（同前）', createdAt: now - day * 20, updatedAt: now - day * 20 },
     { id: 'loss_020202', rubbingId: 'rub_0202', lineNo: 6, charNo: 3, type: 'blur', severity: 'medium', note: '晚拓，「頌」字已漫漶', createdAt: now - day * 18, updatedAt: now - day * 18 },
     { id: 'loss_030101', rubbingId: 'rub_0301', lineNo: 4, charNo: 3, type: 'blur', severity: 'heavy', note: '民国拓，字口已平', createdAt: now - day * 10, updatedAt: now - day * 10 },
+    { id: 'loss_010104', rubbingId: 'rub_0101', lineNo: 15, charNo: 6, type: 'blur', severity: 'light', note: '本馆新见细泐，待合作馆复核', createdAt: now - day * 3, updatedAt: now - day * 3 },
   ];
 
   const seals: Seal[] = [
@@ -219,18 +251,61 @@ export async function seedDatabase(): Promise<void> {
     { id: 'seal_0201', rubbingId: 'rub_0201', sealText: '石门旧拓', position: '左上角', transcription: '藏家自钤印', sealType: 'author', createdAt: now - day * 26, updatedAt: now - day * 26 },
   ];
 
+  const fingerprint0101 = '3:7:blur:1|5:2:stoneFlower:2|9:11:missing:3';
+  const fingerprint0102 = '3:7:blur:2|9:11:missing:3|12:4:crack:2';
   const compares: Compare[] = [
-    { id: 'cmp_0101', steleId: 'stele_01', rubbingIdA: 'rub_0101', rubbingIdB: 'rub_0102', diffCount: 3, conclusion: 'early', operator: '傅砚', date: '2026-03-06', createdAt: now - day * 5, updatedAt: now - day * 5 },
-    { id: 'cmp_0201', steleId: 'stele_02', rubbingIdA: 'rub_0201', rubbingIdB: 'rub_0202', diffCount: 1, conclusion: 'late', operator: '傅砚', date: '2026-03-08', createdAt: now - day * 3, updatedAt: now - day * 3 },
+    { id: 'cmp_0101', steleId: 'stele_01', rubbingIdA: 'rub_0101', rubbingIdB: 'rub_0102', diffCount: 3, conclusion: 'early', operator: '傅砚', date: '2026-03-06', status: 'stale', staleReason: '本馆损泐已改动，需看物后重新确认', fingerprintA: fingerprint0101, fingerprintB: fingerprint0102, createdAt: now - day * 5, updatedAt: now - day * 2 },
+    { id: 'cmp_0201', steleId: 'stele_02', rubbingIdA: 'rub_0201', rubbingIdB: 'rub_0202', diffCount: 1, conclusion: 'late', operator: '傅砚', date: '2026-03-08', status: 'current', staleReason: '', fingerprintA: '2:5:crack:1', fingerprintB: '2:5:crack:1|6:3:blur:2', createdAt: now - day * 3, updatedAt: now - day * 3 },
   ];
 
-  await db.transaction('rw', [db.steles, db.rubbings, db.losses, db.seals, db.compares], async () => {
-    await db.steles.bulkPut(steles);
-    await db.rubbings.bulkPut(rubbings);
-    await db.losses.bulkPut(losses);
-    await db.seals.bulkPut(seals);
-    await db.compares.bulkPut(compares);
-  });
+  const partnerLosses: PartnerLoss[] = [
+    { id: 'ptl_TB-0101_L3_C7', batchId: 'PTN-202609-01', collectionNo: 'TB-0101', lineNo: 3, charNo: 7, type: 'blur', severity: 'light', transcription: '合作馆补：右下石花初现', remoteLossId: 'HX-L03-C07', partnerName: '合作馆', receivedAt: now - day * 2, createdAt: now - day * 2, updatedAt: now - day * 2 },
+    { id: 'ptl_TB-0101_L5_C2', batchId: 'PTN-202609-01', collectionNo: 'TB-0101', lineNo: 5, charNo: 2, type: 'stoneFlower', severity: 'medium', transcription: '合作馆原释：石花近「年」字', remoteLossId: 'HX-L05-C02', partnerName: '合作馆', receivedAt: now - day * 2, createdAt: now - day * 2, updatedAt: now - day * 2 },
+    { id: 'ptl_TB-0101_L9_C11', batchId: 'PTN-202609-01', collectionNo: 'TB-0101', lineNo: 9, charNo: 11, type: 'missing', severity: 'heavy', transcription: '合作馆释：「禮」字末笔泐去', remoteLossId: 'HX-L09-C11', partnerName: '合作馆', receivedAt: now - day * 2, createdAt: now - day * 2, updatedAt: now - day * 2 },
+    { id: 'ptl_TB-0101_L12_C4', batchId: 'PTN-202609-01', collectionNo: 'TB-0101', lineNo: 12, charNo: 4, type: 'crack', severity: 'medium', transcription: '对方登记：横斜裂至碑阳', remoteLossId: 'HX-L12-C04', partnerName: '合作馆', receivedAt: now - day * 2, createdAt: now - day * 2, updatedAt: now - day * 2 },
+  ];
+
+  const reconciliationBatches: ReconciliationBatch[] = [
+    {
+      id: 'PTN-202609-01',
+      partnerName: '合作馆',
+      status: 'completed',
+      attemptCount: 1,
+      receivedAt: now - day * 2,
+      completedAt: now - day * 2,
+      rubbingCount: 1,
+      partnerLossCount: 4,
+      localLossCount: 4,
+      itemCount: 5,
+      unmatchedCollectionCount: 0,
+      payloadChecksum: 'seed:PTN-202609-01',
+      createdAt: now - day * 2,
+      updatedAt: now - day * 2,
+    },
+  ];
+
+  const reconciliationItems: ReconciliationItem[] = [
+    { id: 'rcn_TB-0101_L3_C7', batchId: 'PTN-202609-01', firstBatchId: 'PTN-202609-01', collectionNo: 'TB-0101', rubbingId: 'rub_0101', lineNo: 3, charNo: 7, status: 'matched', localLossId: 'loss_010101', partnerLossId: 'ptl_TB-0101_L3_C7', reviewedBy: '', reviewedAt: null, reviewNote: '', localSnapshot: losses[0]!, partnerSnapshot: partnerLosses[0]!, createdAt: now - day * 2, updatedAt: now - day * 2 },
+    { id: 'rcn_TB-0101_L5_C2', batchId: 'PTN-202609-01', firstBatchId: 'PTN-202609-01', collectionNo: 'TB-0101', rubbingId: 'rub_0101', lineNo: 5, charNo: 2, status: 'matched', localLossId: 'loss_010102', partnerLossId: 'ptl_TB-0101_L5_C2', reviewedBy: '', reviewedAt: null, reviewNote: '', localSnapshot: losses[1]!, partnerSnapshot: partnerLosses[1]!, createdAt: now - day * 2, updatedAt: now - day * 2 },
+    { id: 'rcn_TB-0101_L9_C11', batchId: 'PTN-202609-01', firstBatchId: 'PTN-202609-01', collectionNo: 'TB-0101', rubbingId: 'rub_0101', lineNo: 9, charNo: 11, status: 'matched', localLossId: 'loss_010103', partnerLossId: 'ptl_TB-0101_L9_C11', reviewedBy: '', reviewedAt: null, reviewNote: '', localSnapshot: losses[2]!, partnerSnapshot: partnerLosses[2]!, createdAt: now - day * 2, updatedAt: now - day * 2 },
+    { id: 'rcn_TB-0101_L12_C4', batchId: 'PTN-202609-01', firstBatchId: 'PTN-202609-01', collectionNo: 'TB-0101', rubbingId: 'rub_0101', lineNo: 12, charNo: 4, status: 'partnerOnlyPending', localLossId: null, partnerLossId: 'ptl_TB-0101_L12_C4', reviewedBy: '', reviewedAt: null, reviewNote: '', localSnapshot: null, partnerSnapshot: partnerLosses[3]!, createdAt: now - day * 2, updatedAt: now - day * 2 },
+    { id: 'rcn_TB-0101_L15_C6', batchId: 'PTN-202609-01', firstBatchId: 'PTN-202609-01', collectionNo: 'TB-0101', rubbingId: 'rub_0101', lineNo: 15, charNo: 6, status: 'localOnlyPending', localLossId: 'loss_010104', partnerLossId: null, reviewedBy: '', reviewedAt: null, reviewNote: '', localSnapshot: losses[10]!, partnerSnapshot: null, createdAt: now - day * 2, updatedAt: now - day * 2 },
+  ];
+
+  await db.transaction(
+    'rw',
+    [db.steles, db.rubbings, db.losses, db.seals, db.compares, db.partnerLosses, db.reconciliationBatches, db.reconciliationItems],
+    async () => {
+      await db.steles.bulkPut(steles);
+      await db.rubbings.bulkPut(rubbings);
+      await db.losses.bulkPut(losses);
+      await db.seals.bulkPut(seals);
+      await db.compares.bulkPut(compares);
+      await db.partnerLosses.bulkPut(partnerLosses);
+      await db.reconciliationBatches.bulkPut(reconciliationBatches);
+      await db.reconciliationItems.bulkPut(reconciliationItems);
+    },
+  );
 }
 
 /* ------------------------------ 整库导入导出 ------------------------------ */
@@ -244,16 +319,23 @@ export interface RubbingSnapshot {
   losses: Loss[];
   seals: Seal[];
   compares: Compare[];
+  partnerLosses: PartnerLoss[];
+  reconciliationBatches: ReconciliationBatch[];
+  reconciliationItems: ReconciliationItem[];
 }
 
 export async function exportSnapshot(): Promise<RubbingSnapshot> {
-  const [steles, rubbings, losses, seals, compares] = await Promise.all([
-    db.steles.toArray(),
-    db.rubbings.toArray(),
-    db.losses.toArray(),
-    db.seals.toArray(),
-    db.compares.toArray(),
-  ]);
+  const [steles, rubbings, losses, seals, compares, partnerLosses, reconciliationBatches, reconciliationItems] =
+    await Promise.all([
+      db.steles.toArray(),
+      db.rubbings.toArray(),
+      db.losses.toArray(),
+      db.seals.toArray(),
+      db.compares.toArray(),
+      db.partnerLosses.toArray(),
+      db.reconciliationBatches.toArray(),
+      db.reconciliationItems.toArray(),
+    ]);
   return {
     app: DB_NAME,
     schemaVersion: DB_SCHEMA_VERSION,
@@ -263,6 +345,9 @@ export async function exportSnapshot(): Promise<RubbingSnapshot> {
     losses,
     seals,
     compares,
+    partnerLosses,
+    reconciliationBatches,
+    reconciliationItems,
   };
 }
 
@@ -271,7 +356,16 @@ export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象';
   const snapshot = input as Partial<RubbingSnapshot>;
   if (snapshot.app !== DB_NAME) return `备份文件不属于本项目（app=${String(snapshot.app)}）`;
-  const keys: Array<keyof RubbingSnapshot> = ['steles', 'rubbings', 'losses', 'seals', 'compares'];
+  const keys: Array<keyof RubbingSnapshot> = [
+    'steles',
+    'rubbings',
+    'losses',
+    'seals',
+    'compares',
+    'partnerLosses',
+    'reconciliationBatches',
+    'reconciliationItems',
+  ];
   for (const key of keys) {
     if (!Array.isArray(snapshot[key])) return `备份文件缺少 ${String(key)} 集合`;
   }
@@ -279,26 +373,57 @@ export function validateSnapshot(input: unknown): string {
 }
 
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.steles, db.rubbings, db.losses, db.seals, db.compares], async () => {
-    await Promise.all([
-      db.steles.clear(),
-      db.rubbings.clear(),
-      db.losses.clear(),
-      db.seals.clear(),
-      db.compares.clear(),
-    ]);
-  });
+  await db.transaction(
+    'rw',
+    [db.steles, db.rubbings, db.losses, db.seals, db.compares, db.partnerLosses, db.reconciliationBatches, db.reconciliationItems],
+    async () => {
+      await Promise.all([
+        db.steles.clear(),
+        db.rubbings.clear(),
+        db.losses.clear(),
+        db.seals.clear(),
+        db.compares.clear(),
+        db.partnerLosses.clear(),
+        db.reconciliationBatches.clear(),
+        db.reconciliationItems.clear(),
+      ]);
+    },
+  );
 }
 
-export async function importSnapshot(snapshot: RubbingSnapshot): Promise<void> {
+function normalizeSnapshot(snapshot: RubbingSnapshot): RubbingSnapshot {
+  return {
+    ...snapshot,
+    compares: snapshot.compares.map((compare) => ({
+      ...compare,
+      status: compare.status ?? 'stale',
+      staleReason: compare.staleReason ?? '导入的旧版结论无源损泐指纹，需重新确认',
+      fingerprintA: compare.fingerprintA ?? '',
+      fingerprintB: compare.fingerprintB ?? '',
+    })),
+    partnerLosses: snapshot.partnerLosses ?? [],
+    reconciliationBatches: snapshot.reconciliationBatches ?? [],
+    reconciliationItems: snapshot.reconciliationItems ?? [],
+  };
+}
+
+export async function importSnapshot(inputSnapshot: RubbingSnapshot): Promise<void> {
+  const snapshot = normalizeSnapshot(inputSnapshot);
   await clearAllTables();
-  await db.transaction('rw', [db.steles, db.rubbings, db.losses, db.seals, db.compares], async () => {
-    await db.steles.bulkPut(snapshot.steles);
-    await db.rubbings.bulkPut(snapshot.rubbings);
-    await db.losses.bulkPut(snapshot.losses);
-    await db.seals.bulkPut(snapshot.seals);
-    await db.compares.bulkPut(snapshot.compares);
-  });
+  await db.transaction(
+    'rw',
+    [db.steles, db.rubbings, db.losses, db.seals, db.compares, db.partnerLosses, db.reconciliationBatches, db.reconciliationItems],
+    async () => {
+      await db.steles.bulkPut(snapshot.steles);
+      await db.rubbings.bulkPut(snapshot.rubbings);
+      await db.losses.bulkPut(snapshot.losses);
+      await db.seals.bulkPut(snapshot.seals);
+      await db.compares.bulkPut(snapshot.compares);
+      await db.partnerLosses.bulkPut(snapshot.partnerLosses);
+      await db.reconciliationBatches.bulkPut(snapshot.reconciliationBatches);
+      await db.reconciliationItems.bulkPut(snapshot.reconciliationItems);
+    },
+  );
 }
 
 export async function resetDatabase(): Promise<void> {
@@ -307,17 +432,21 @@ export async function resetDatabase(): Promise<void> {
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [steles, rubbings, losses, seals, compares] = await Promise.all([
-    db.steles.count(),
-    db.rubbings.count(),
-    db.losses.count(),
-    db.seals.count(),
-    db.compares.count(),
-  ]);
-  return { steles, rubbings, losses, seals, compares };
+  const [steles, rubbings, losses, seals, compares, partnerLosses, reconciliationBatches, reconciliationItems] =
+    await Promise.all([
+      db.steles.count(),
+      db.rubbings.count(),
+      db.losses.count(),
+      db.seals.count(),
+      db.compares.count(),
+      db.partnerLosses.count(),
+      db.reconciliationBatches.count(),
+      db.reconciliationItems.count(),
+    ]);
+  return { steles, rubbings, losses, seals, compares, partnerLosses, reconciliationBatches, reconciliationItems };
 }
 
-/** 级联删除碑刻 → 拓本 → 损泐 / 钤印 / 比对 */
+/** 级联删除碑刻 → 拓本 → 损泐 / 钤印；联编记录按收藏号留痕，比对记录随碑刻移除 */
 export async function removeSteleCascade(steleId: string): Promise<void> {
   const rubbingIds = (await db.rubbings.where('steleId').equals(steleId).toArray()).map((row) => row.id);
   await db.transaction('rw', [db.steles, db.rubbings, db.losses, db.seals, db.compares], async () => {
